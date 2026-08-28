@@ -38,6 +38,16 @@ func testConfig(t *testing.T, upstreamURL string) Config {
 	}
 }
 
+func TestRequestLogPathExcludesQuery(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "http://example.test/v1/models?token=do-not-log", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestLogPath(request); got != "/v1/models" {
+		t.Fatalf("request log path = %q, want /v1/models", got)
+	}
+}
+
 func TestRetries503AndReplaysPostBody(t *testing.T) {
 	var mu sync.Mutex
 	attempts := 0

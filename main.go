@@ -703,11 +703,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 	}
 	requestID := newRequestID()
+	path := requestLogPath(r)
 	w.Header().Set("X-Cpa-Guard-Request-ID", requestID)
 	start := time.Now()
 	if !p.acquire() {
 		sendJSONError(w, http.StatusServiceUnavailable, "retry capacity is currently full", 0)
-		p.logRequest(requestID, r.Method, http.StatusServiceUnavailable, 0, "capacity_full", start)
+		p.logRequest(requestID, r.Method, path, http.StatusServiceUnavailable, 0, "capacity_full", start)
 		return
 	}
 	defer p.release()
@@ -721,17 +722,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &requestErr) {
 			sendJSONError(w, requestErr.Status, requestErr.Message, 0)
 			p.metrics.recordStatus(requestErr.Status)
-			p.logRequest(requestID, r.Method, requestErr.Status, 0, "request_rejected", start)
+			p.logRequest(requestID, r.Method, path, requestErr.Status, 0, "request_rejected", start)
 			return
 		}
 		if r.Context().Err() != nil {
 			p.metrics.clientCancelled.Add(1)
-			p.logRequest(requestID, r.Method, 0, 0, "client_cancelled", start)
+			p.logRequest(requestID, r.Method, path, 0, 0, "client_cancelled", start)
 			return
 		}
 		sendJSONError(w, http.StatusBadRequest, "unable to read request body", 0)
 		p.metrics.recordStatus(http.StatusBadRequest)
-		p.logRequest(requestID, r.Method, http.StatusBadRequest, 0, "request_body_error", start)
+		p.logRequest(requestID, r.Method, path, http.StatusBadRequest, 0, "request_body_error", start)
 		return
 	}
 
@@ -742,7 +743,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if outcome == "client_cancelled" {
 		p.metrics.clientCancelled.Add(1)
 	}
-	p.logRequest(requestID, r.Method, status, attempts, outcome, start)
+	p.logRequest(requestID, r.Method, path, status, attempts, outcome, start)
 }
 
 func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request, body *spooledBody) (int, int, string) {
@@ -832,11 +833,23 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 	return http.StatusServiceUnavailable, attemptsMade, "retry_budget_exhausted"
 }
 
-func (p *Proxy) logRequest(requestID, method string, status, attempts int, outcome string, start time.Time) {
+func requestLogPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return "/"
+	}
+	path := r.URL.EscapedPath()
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func (p *Proxy) logRequest(requestID, method, path string, status, attempts int, outcome string, start time.Time) {
 	entry := map[string]any{
 		"event":       "request",
 		"request_id":  requestID,
 		"method":      method,
+		"path":        path,
 		"status":      status,
 		"attempts":    attempts,
 		"outcome":     outcome,
