@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This installer owns only /home/cliproxy/cpa-guard and never edits the
+# upstream gateway's configuration.
+APP_USER="cliproxy"
+APP_GROUP="cliproxy"
+HOME_DIR="/home/${APP_USER}"
+BASE_DIR="${HOME_DIR}/cpa-guard"
+RELEASES_DIR="${BASE_DIR}/releases"
+CURRENT_LINK="${BASE_DIR}/current"
+TMP_DIR="${BASE_DIR}/tmp"
+ENV_FILE="${BASE_DIR}/.env"
+BIN_LINK="/usr/local/bin/cpa-guard"
+SERVICE_NAME="cpa-guard"
+UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+APP_PORT_DEFAULT="8217"
+UPSTREAM_URL_DEFAULT="http://127.0.0.1:8317"
+HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-60}"
+DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://github.com/k0ngk0ng/cpa-guard/releases/download}"
+DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+VERIFY_CHECKSUM="${VERIFY_CHECKSUM:-true}"
+
+VERSION=""
+TMP_TAR=""
+CHECKSUM_FILE=""
+
+cleanup_download() {
+  [[ -z "${TMP_TAR}" ]] || rm -f "${TMP_TAR}"
+  [[ -z "${CHECKSUM_FILE}" ]] || rm -f "${CHECKSUM_FILE}"
+}
+
+trap cleanup_download EXIT
+
+usage() {
+  cat <<EOF
+Usage:
+  sudo ./cpa-guard-install --version <x.y.z-n>
+
+Example:
+  sudo ./cpa-guard-install --version 0.1.0-0
+
+Environment Variables:
+  HEALTH_CHECK_TIMEOUT   seconds to wait for /healthz (default: 60)
+  DOWNLOAD_BASE          GitHub release base URL override
+  VERIFY_CHECKSUM        verify .sha256 release asset (default: true)
+EOF
+}
+
+need_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "ERROR: please run as root (use sudo)" >&2
+    exit 1
+  fi
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version)
+        VERSION="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+  if [[ -z "${VERSION}" ]]; then
+    echo "ERROR: --version is required" >&2
+    usage
+    exit 1
+  fi
+  if [[ ! "${VERSION}" =~ ^[0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "ERROR: invalid version: ${VERSION}" >&2
+    exit 1
+  fi
+}
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "aarch64" ;;
+    *) echo "ERROR: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+}
+
+ensure_user() {
+  if id "${APP_USER}" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "==> Create system user: ${APP_USER}"
+  useradd -r -m -d "${HOME_DIR}" -s /bin/bash "${APP_USER}"
+}
+
+ensure_dirs() {
+  mkdir -p "${BASE_DIR}" "${RELEASES_DIR}" "${TMP_DIR}"
+  chown -R "${APP_USER}:${APP_GROUP}" "${BASE_DIR}"
+  chmod 750 "${BASE_DIR}"
+  chmod 700 "${TMP_DIR}"
+}
+
+download_file() {
+  local url="$1"
+  local output="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 15 -o "${output}" "${url}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "${output}" "${url}"
+  else
+    echo "ERROR: curl or wget is required" >&2
+    exit 1
+  fi
+}
+
+download_and_extract() {
+  local arch tarball url tmp_tar release_dir checksum_file expected actual
+  arch="$(detect_arch)"
+  tarball="cpa-guard_${VERSION}_linux_${arch}.tar.gz"
+  url="${DOWNLOAD_BASE}/v${VERSION}/${tarball}"
+  tmp_tar="$(mktemp "/tmp/${tarball}.XXXXXX")"
+  checksum_file="${tmp_tar}.sha256"
+  TMP_TAR="${tmp_tar}"
+  CHECKSUM_FILE="${checksum_file}"
+  release_dir="${RELEASES_DIR}/${VERSION}"
+
+  echo "==> Download: ${url}"
+  download_file "${url}" "${tmp_tar}"
+
+  if [[ "${VERIFY_CHECKSUM}" == "true" ]]; then
+    echo "==> Download checksum"
+    download_file "${url}.sha256" "${checksum_file}"
+    expected="$(awk 'NF {print $1; exit}' "${checksum_file}")"
+    actual="$(sha256sum "${tmp_tar}" | awk '{print $1}')"
+    if [[ -z "${expected}" || "${expected}" != "${actual}" ]]; then
+      echo "ERROR: checksum verification failed" >&2
+      exit 1
+    fi
+  fi
+
+  if tar -tzf "${tmp_tar}" | grep -Eq '(^/|(^|/)\.\.(\/|$))'; then
+    echo "ERROR: archive contains an unsafe path" >&2
+    exit 1
+  fi
+
+  mkdir -p "${release_dir}"
+  echo "==> Extract to: ${release_dir}"
+  tar -xzf "${tmp_tar}" -C "${release_dir}"
+  if [[ ! -f "${release_dir}/cpa-guard" ]]; then
+    echo "ERROR: ${release_dir}/cpa-guard not found after extract" >&2
+    ls -la "${release_dir}" >&2 || true
+    exit 1
+  fi
+  chmod 755 "${release_dir}/cpa-guard"
+  chown -R "${APP_USER}:${APP_GROUP}" "${release_dir}"
+}
+
+switch_current() {
+  local release_dir="${RELEASES_DIR}/${VERSION}"
+  echo "==> Switch current -> ${release_dir}"
+  ln -sfn "${release_dir}" "${CURRENT_LINK}"
+  chown -h "${APP_USER}:${APP_GROUP}" "${CURRENT_LINK}" || true
+}
+
+ensure_env_file() {
+  if [[ -f "${ENV_FILE}" ]]; then
+    chown "${APP_USER}:${APP_GROUP}" "${ENV_FILE}"
+    chmod 640 "${ENV_FILE}"
+    return 0
+  fi
+
+  local example="${CURRENT_LINK}/.env.example"
+  if [[ -f "${example}" ]]; then
+    echo "==> Create ${ENV_FILE} from .env.example"
+    cp "${example}" "${ENV_FILE}"
+  else
+    echo "WARN: ${example} not found; writing minimal .env" >&2
+    cat > "${ENV_FILE}" <<EOF
+APP_PORT=${APP_PORT_DEFAULT}
+UPSTREAM_URL=${UPSTREAM_URL_DEFAULT}
+MAX_ATTEMPTS=100
+MAX_ELAPSED_MS=3300000
+BODY_DIR=${TMP_DIR}
+METRICS_ENABLED=false
+EOF
+  fi
+  chown "${APP_USER}:${APP_GROUP}" "${ENV_FILE}"
+  chmod 640 "${ENV_FILE}"
+  echo "    Edit ${ENV_FILE} if you need a different retry budget."
+}
+
+ensure_bin_link() {
+  echo "==> Link binary: ${BIN_LINK} -> ${CURRENT_LINK}/cpa-guard"
+  ln -sfn "${CURRENT_LINK}/cpa-guard" "${BIN_LINK}"
+}
+
+ensure_systemd_unit() {
+  echo "==> Write systemd unit: ${UNIT_FILE}"
+  cat > "${UNIT_FILE}" <<EOF
+[Unit]
+Description=CPA Guard retry proxy
+After=network-online.target cliproxyapi.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_GROUP}
+Environment=HOME=${HOME_DIR}
+EnvironmentFile=${ENV_FILE}
+WorkingDirectory=${BASE_DIR}
+ExecStart=${BIN_LINK}
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+}
+
+restart_service() {
+  echo "==> Restart service: ${SERVICE_NAME}"
+  systemctl restart "${SERVICE_NAME}" || systemctl start "${SERVICE_NAME}"
+  systemctl --no-pager --full status "${SERVICE_NAME}" || true
+}
+
+read_env_value() {
+  local key="$1"
+  awk -F= -v key="${key}" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}" \
+    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+wait_for_healthy() {
+  local app_port health_url timeout start_time elapsed http_code
+  app_port="$(read_env_value APP_PORT)"
+  app_port="${app_port:-${APP_PORT_DEFAULT}}"
+  health_url="http://127.0.0.1:${app_port}/healthz"
+  timeout="${HEALTH_CHECK_TIMEOUT}"
+  start_time="$(date +%s)"
+  echo "==> Wait for healthz: ${health_url}"
+  while true; do
+    elapsed=$(( $(date +%s) - start_time ))
+    if (( elapsed >= timeout )); then
+      echo "    WARN: health check timeout after ${timeout}s" >&2
+      return 1
+    fi
+    http_code="$(curl -sS -w '%{http_code}' -o /dev/null "${health_url}" 2>/dev/null || true)"
+    if [[ "${http_code}" == "200" ]]; then
+      echo "    Service is healthy (took ${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+}
+
+main() {
+  need_root
+  parse_args "$@"
+  ensure_user
+  ensure_dirs
+  download_and_extract
+  switch_current
+  ensure_env_file
+  ensure_bin_link
+  ensure_systemd_unit
+  restart_service
+  wait_for_healthy || true
+  echo
+  echo "Done."
+  echo "Env:     ${ENV_FILE}"
+  echo "Current: ${CURRENT_LINK}"
+  echo "Logs:    journalctl -u ${SERVICE_NAME} -f"
+}
+
+main "$@"
