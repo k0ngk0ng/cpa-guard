@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+
+      - name: Check installer syntax
+        run: bash -n scripts/cpa-guard-install
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            archive_arch: amd64
+          - goarch: arm64
+            archive_arch: aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release archive
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE_ARCH: ${{ matrix.archive_arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "${version}" =~ ^[0-9][A-Za-z0-9._-]*$ ]]
+          archive="cpa-guard_${version}_linux_${ARCHIVE_ARCH}"
+          mkdir -p "dist/${archive}"
+          CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH}" \
+            go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o "dist/${archive}/cpa-guard" .
+          cp .env.example scripts/cpa-guard-install "dist/${archive}/"
+          chmod 755 "dist/${archive}/cpa-guard-install"
+          tar -czf "dist/${archive}.tar.gz" -C "dist/${archive}" .
+          sha256sum "dist/${archive}.tar.gz" > "dist/${archive}.tar.gz.sha256"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.archive_arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

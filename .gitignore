@@ -3,5 +3,3 @@
 .env
 .env.*
 !.env.example
-# Publishing workflow files requires the GitHub OAuth workflow scope.
-.github/workflows/
