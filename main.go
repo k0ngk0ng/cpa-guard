@@ -67,6 +67,7 @@ type Config struct {
 	HeaderTimeout         time.Duration
 	MetricsEnabled        bool
 	BodyDir               string
+	Debug                 bool
 	RetryStatuses         map[int]struct{}
 }
 
@@ -174,6 +175,7 @@ func loadConfig() (Config, error) {
 		HeaderTimeout:         headerTimeout,
 		MetricsEnabled:        envBool("METRICS_ENABLED", false),
 		BodyDir:               envString("BODY_DIR", os.TempDir()),
+		Debug:                 envBool("DEBUG", false),
 		RetryStatuses:         statuses,
 	}, nil
 }
@@ -276,7 +278,7 @@ func spoolBody(r *http.Request, cfg Config) (*spooledBody, error) {
 	if cfg.MemoryBodyBytes > 0 && r.ContentLength >= 0 && r.ContentLength <= cfg.MemoryBodyBytes {
 		data, readErr := io.ReadAll(io.LimitReader(r.Body, cfg.MaxBodyBytes+1))
 		if readErr != nil {
-			return nil, readErr
+			return nil, fmt.Errorf("read request body in memory: %w", readErr)
 		}
 		if int64(len(data)) > cfg.MaxBodyBytes {
 			return nil, &httpError{Status: http.StatusRequestEntityTooLarge, Message: "request body exceeds configured limit"}
@@ -286,7 +288,7 @@ func spoolBody(r *http.Request, cfg Config) (*spooledBody, error) {
 
 	dir, err := os.MkdirTemp(cfg.BodyDir, "cpa-guard-")
 	if err != nil {
-		return nil, fmt.Errorf("create request spool: %w", err)
+		return nil, fmt.Errorf("create request spool directory: %w", err)
 	}
 	path := filepath.Join(dir, "body")
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -300,11 +302,11 @@ func spoolBody(r *http.Request, cfg Config) (*spooledBody, error) {
 	closeErr := file.Close()
 	if copyErr != nil {
 		_ = os.RemoveAll(dir)
-		return nil, copyErr
+		return nil, fmt.Errorf("read request body to spool: %w", copyErr)
 	}
 	if closeErr != nil {
 		_ = os.RemoveAll(dir)
-		return nil, closeErr
+		return nil, fmt.Errorf("close request spool file: %w", closeErr)
 	}
 	if size > cfg.MaxBodyBytes {
 		_ = os.RemoveAll(dir)
@@ -718,6 +720,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer body.cleanup()
 	}
 	if err != nil {
+		p.logRequestBodyDebug(requestID, r, err)
 		var requestErr *httpError
 		if errors.As(err, &requestErr) {
 			sendJSONError(w, requestErr.Status, requestErr.Message, 0)
@@ -842,6 +845,33 @@ func requestLogPath(r *http.Request) string {
 		return "/"
 	}
 	return path
+}
+
+// logRequestBodyDebug emits diagnostics for failures that happen before an
+// upstream attempt. It intentionally records request metadata only: request
+// bodies, authorization headers, and query parameters must never be logged.
+func (p *Proxy) logRequestBodyDebug(requestID string, r *http.Request, err error) {
+	if !p.cfg.Debug {
+		return
+	}
+
+	entry := map[string]any{
+		"event":             "request_body_debug",
+		"request_id":        requestID,
+		"method":            r.Method,
+		"path":              requestLogPath(r),
+		"content_length":    r.ContentLength,
+		"transfer_encoding": append([]string(nil), r.TransferEncoding...),
+		"content_type":      r.Header.Get("Content-Type"),
+		"content_encoding":  r.Header.Get("Content-Encoding"),
+		"expect":            r.Header.Get("Expect"),
+		"max_body_bytes":    p.cfg.MaxBodyBytes,
+		"memory_body_bytes": p.cfg.MemoryBodyBytes,
+		"body_dir":          p.cfg.BodyDir,
+		"error":             err.Error(),
+	}
+	payload, _ := json.Marshal(entry)
+	fmt.Println(string(payload))
 }
 
 func (p *Proxy) logRequest(requestID, method, path string, status, attempts int, outcome string, start time.Time) {

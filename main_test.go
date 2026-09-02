@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,10 @@ import (
 	"testing"
 	"time"
 )
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("simulated body read failure") }
 
 func testConfig(t *testing.T, upstreamURL string) Config {
 	t.Helper()
@@ -45,6 +50,28 @@ func TestRequestLogPathExcludesQuery(t *testing.T) {
 	}
 	if got := requestLogPath(request); got != "/v1/models" {
 		t.Fatalf("request log path = %q, want /v1/models", got)
+	}
+}
+
+func TestSpoolBodyAddsReadContext(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/v1/responses", failingReader{})
+	request.ContentLength = 1
+	cfg := testConfig(t, "http://127.0.0.1:1")
+
+	_, err := spoolBody(request, cfg)
+	if err == nil || !strings.Contains(err.Error(), "read request body in memory: simulated body read failure") {
+		t.Fatalf("spoolBody error = %v", err)
+	}
+}
+
+func TestLoadConfigDebug(t *testing.T) {
+	t.Setenv("DEBUG", "true")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Debug {
+		t.Fatal("DEBUG=true was not loaded")
 	}
 }
 

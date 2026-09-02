@@ -25,6 +25,13 @@ Copy `.env.example` to the service's `.env` and adjust the retry budget to the c
 | `RETRY_STATUSES` | `502,503,504` | Statuses retried before output starts |
 | `MEMORY_BODY_BYTES` | `2097152` | Keep small replay bodies in memory; larger ones use `BODY_DIR` |
 | `BODY_DIR` | `/home/cliproxy/cpa-guard/tmp` | Temporary request-body spool |
+| `DEBUG` | `false` | Log safe request-body failure diagnostics; never logs bodies or authorization headers |
+
+When diagnosing a `request_body_error`, set `DEBUG=true` and restart cpa-guard.
+The next failure emits a `request_body_debug` JSON line containing the underlying
+read/spool error plus request-body metadata (length, transfer encoding, and the
+configured limits). It does not log the request body, query string, or
+authorization headers. Set it back to `false` after diagnosis.
 
 Do not enable high retry counts without accounting for duplicate upstream work and billing. A 503 can arrive after an upstream has accepted a POST, so tool calls and other side effects must remain idempotent at the caller level.
 
