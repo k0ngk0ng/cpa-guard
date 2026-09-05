@@ -19,6 +19,8 @@ type modelRule struct {
 
 type modelRules map[string]modelRule
 
+const defaultModelACLFile = "model-acl.toml"
+
 type modelPolicy struct {
 	// Legacy JSON uses a per-key allow list; TOML computes denied models per key.
 	allow modelSet
@@ -40,6 +42,16 @@ func (p *modelPolicy) permits(model string) bool {
 }
 
 func loadACLConfig(path string) (modelACL, modelRules, error) {
+	if path == "" {
+		path = defaultModelACLFile
+		// Only an absent default file disables ACL. A broken symlink,
+		// unreadable file, or malformed policy must still prevent startup.
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return nil, nil, nil
+		} else if err != nil {
+			return nil, nil, fmt.Errorf("unable to inspect default model-acl.toml")
+		}
+	}
 	// Preserve JSON loading for existing files, including extensionless paths.
 	if !strings.EqualFold(filepath.Ext(path), ".toml") {
 		acl, err := loadModelACL(path)

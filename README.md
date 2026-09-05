@@ -20,7 +20,7 @@ Copy `.env.example` to the service's `.env` and adjust the retry budget to the c
 | --- | ---: | --- |
 | `APP_PORT` | `8217` | Listening port when `LISTEN_ADDR` is unset |
 | `UPSTREAM_URL` | `http://127.0.0.1:8317` | Existing CPA endpoint |
-| `MODEL_ACL_FILE` | unset | Optional TOML model ACL file (legacy JSON also supported) |
+| `MODEL_ACL_FILE` | `model-acl.toml` | ACL file in the working directory; optional path override (legacy JSON also supported) |
 | `MAX_ATTEMPTS` | `100` | Total attempts, capped at 500 |
 | `MAX_ELAPSED_MS` | `3300000` in the example | Overall retry budget |
 | `RETRY_STATUSES` | `502,503,504` | Statuses retried before output starts |
@@ -38,8 +38,9 @@ Do not enable high retry counts without accounting for duplicate upstream work a
 
 ## Model access control
 
-Set `MODEL_ACL_FILE` to an absolute path ending in `.toml`, for example
-`/home/cliproxy/cpa-guard/model-acl.toml`:
+Create `model-acl.toml` in the working directory and restart the service;
+no environment variable is required. With the included installer, the path is
+`/home/cliproxy/cpa-guard/model-acl.toml` (beside `.env`):
 
 ```toml
 # Only these keys may use this model.
@@ -71,8 +72,11 @@ access to the requested model receives `403` before any upstream attempt.
 
 Protect the file as a secret (for example, mode `0600`, readable by the service
 account). `model-acl.toml` and `model-acl.json` are ignored by Git. Restart the
-service after changes. With `MODEL_ACL_FILE` unset, ACL is disabled and existing
-proxy behavior is preserved.
+service after changes. If the default file is absent, ACL is disabled and
+existing proxy behavior is preserved. An unreadable or invalid default file
+prevents startup. To use another location, set `MODEL_ACL_FILE` explicitly;
+an explicitly configured file must exist. Remove the default file and leave
+`MODEL_ACL_FILE` unset to disable ACL.
 
 For compatibility, files without a `.toml` extension retain the original JSON
 format: `{"key-a":["gpt-4o"],"key-admin":["*"]}`. This legacy format is a

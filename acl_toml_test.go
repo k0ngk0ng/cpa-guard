@@ -342,3 +342,66 @@ func TestTOMLModelListDoesNotReuseConditionalResponse(t *testing.T) {
 		t.Fatalf("model list status=%d, want 502", response.StatusCode)
 	}
 }
+
+func TestLoadConfigDefaultModelACLFile(t *testing.T) {
+	for _, scenario := range []string{"absent", "present", "invalid", "directory", "broken symlink", "override", "missing override"} {
+		t.Run(scenario, func(t *testing.T) {
+			originalDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Chdir(originalDir); err != nil {
+					t.Error(err)
+				}
+			})
+			t.Setenv("MODEL_ACL_FILE", "")
+			policy := "[models.\"restricted\"]\nallow_keys = [\"key-a\"]\n"
+			writeDefault := func(contents string) {
+				t.Helper()
+				if err := os.WriteFile(defaultModelACLFile, []byte(contents), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch scenario {
+			case "present":
+				writeDefault(policy)
+			case "invalid":
+				writeDefault("[invalid TOML")
+			case "directory":
+				if err := os.Mkdir(defaultModelACLFile, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "broken symlink":
+				if err := os.Symlink("missing.toml", defaultModelACLFile); err != nil {
+					t.Fatal(err)
+				}
+			case "override":
+				writeDefault("[invalid TOML")
+				t.Setenv("MODEL_ACL_FILE", writeTOMLACLFile(t, policy))
+			case "missing override":
+				writeDefault(policy)
+				t.Setenv("MODEL_ACL_FILE", filepath.Join(dir, "missing.toml"))
+			}
+			cfg, err := loadConfig()
+			switch scenario {
+			case "absent":
+				if err != nil || cfg.ModelRules != nil || cfg.ModelACL != nil {
+					t.Fatalf("absent default must disable ACL: %v", err)
+				}
+			case "present", "override":
+				if err != nil || len(cfg.ModelRules["restricted"].AllowKeys) != 1 {
+					t.Fatalf("policy was not loaded: %v", err)
+				}
+			default:
+				if err == nil {
+					t.Fatal("invalid or explicitly missing policy must prevent startup")
+				}
+			}
+		})
+	}
+}
