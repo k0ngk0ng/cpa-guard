@@ -71,10 +71,11 @@ type Config struct {
 	RetryStatuses         map[int]struct{}
 	ModelACL              modelACL
 	ModelRules            modelRules
+	RetryKeys             map[string]bool // nil allows all; an empty map disables retries
 }
 
 func loadConfig() (Config, error) {
-	acl, rules, err := loadACLConfig(strings.TrimSpace(os.Getenv("MODEL_ACL_FILE")))
+	acl, rules, retryKeys, err := loadACLConfig(strings.TrimSpace(os.Getenv("MODEL_ACL_FILE")))
 	if err != nil {
 		return Config{}, err
 	}
@@ -185,6 +186,7 @@ func loadConfig() (Config, error) {
 		RetryStatuses:         statuses,
 		ModelACL:              acl,
 		ModelRules:            rules,
+		RetryKeys:             retryKeys,
 	}, nil
 }
 
@@ -457,8 +459,8 @@ func (p *Proxy) doAttempt(incoming *http.Request, body *spooledBody, attempt int
 	return attemptResult{response: response, release: release}
 }
 
-func (p *Proxy) canRetry(attempt int, deadline time.Time, delay time.Duration) bool {
-	if attempt >= p.cfg.MaxAttempts {
+func (p *Proxy) canRetry(attempt, maxAttempts int, deadline time.Time, delay time.Duration) bool {
+	if attempt >= maxAttempts {
 		return false
 	}
 	if deadline.IsZero() {
@@ -790,8 +792,9 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 		deadline = time.Now().Add(p.cfg.MaxElapsed)
 	}
 	attemptsMade := 0
+	maxAttempts := p.cfg.requestMaxAttempts(incoming)
 
-	for attempt := 1; attempt <= p.cfg.MaxAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if incoming.Context().Err() != nil {
 			return 0, attempt - 1, "client_cancelled"
 		}
@@ -805,7 +808,7 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 			if incoming.Context().Err() != nil {
 				return 0, attempt, "client_cancelled"
 			}
-			if !p.canRetry(attempt, deadline, p.retryDelay(attempt, 0)) {
+			if !p.canRetry(attempt, maxAttempts, deadline, p.retryDelay(attempt, 0)) {
 				break
 			}
 			delay := p.retryDelay(attempt, 0)
@@ -843,7 +846,7 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 
 		retryAfter := parseRetryAfter(response.Header.Get("Retry-After"))
 		delay := p.retryDelay(attempt, retryAfter)
-		if !p.canRetry(attempt, deadline, delay) {
+		if !p.canRetry(attempt, maxAttempts, deadline, delay) {
 			status, copyErr := forwardResponse(w, response, attempt)
 			result.release()
 			if copyErr != nil && incoming.Context().Err() != nil {

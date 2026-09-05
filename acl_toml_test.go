@@ -23,7 +23,7 @@ func writeTOMLACLFile(t *testing.T, contents string) string {
 
 func loadTOMLRulesForTest(t *testing.T, contents string) modelRules {
 	t.Helper()
-	acl, rules, err := loadACLConfig(writeTOMLACLFile(t, contents))
+	acl, rules, _, err := loadACLConfig(writeTOMLACLFile(t, contents))
 	if err != nil {
 		t.Fatalf("loadACLConfig: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestLoadACLConfigTOMLRejectsUnknownDuplicateMissingAndWrongTypes(t *testing
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, rules, err := loadACLConfig(writeTOMLACLFile(t, test.data))
+			_, rules, _, err := loadACLConfig(writeTOMLACLFile(t, test.data))
 			if err == nil || rules != nil {
 				t.Fatalf("loadACLConfig() = rules=%#v err=%v, want an error", rules, err)
 			}

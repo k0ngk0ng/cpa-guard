@@ -41,52 +41,68 @@ func (p *modelPolicy) permits(model string) bool {
 	return !p.deny[model]
 }
 
-func loadACLConfig(path string) (modelACL, modelRules, error) {
+func loadACLConfig(path string) (modelACL, modelRules, map[string]bool, error) {
 	if path == "" {
 		path = defaultModelACLFile
 		// Only an absent default file disables ACL. A broken symlink,
 		// unreadable file, or malformed policy must still prevent startup.
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		} else if err != nil {
-			return nil, nil, fmt.Errorf("unable to inspect default model-acl.toml")
+			return nil, nil, nil, fmt.Errorf("unable to inspect default model-acl.toml")
 		}
 	}
 	// Preserve JSON loading for existing files, including extensionless paths.
 	if !strings.EqualFold(filepath.Ext(path), ".toml") {
 		acl, err := loadModelACL(path)
-		return acl, nil, err
+		return acl, nil, nil, err
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to open MODEL_ACL_FILE")
+		return nil, nil, nil, fmt.Errorf("unable to open MODEL_ACL_FILE")
 	}
 	defer file.Close()
 	var config struct {
 		Models modelRules `toml:"models"`
+		Retry  *modelRule `toml:"retry"`
 	}
 	metadata, err := toml.NewDecoder(file).Decode(&config)
 	// Parser diagnostics can include secret key values, so never surface them.
 	if err != nil || len(metadata.Undecoded()) != 0 {
-		return nil, nil, fmt.Errorf("MODEL_ACL_FILE must be valid TOML with only models tables and allow_keys arrays")
+		return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE must be valid TOML with only models/retry tables and allow_keys arrays")
 	}
-	if config.Models == nil {
+	// A retry-only file does not enable model authentication. Preserve the
+	// original empty ACL file behavior when neither section is present.
+	if config.Models == nil && config.Retry == nil {
 		config.Models = make(modelRules)
 	}
 	for model, rule := range config.Models {
 		if model == "" || model == "*" || strings.TrimSpace(model) != model {
-			return nil, nil, fmt.Errorf("MODEL_ACL_FILE contains an invalid model name")
+			return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE contains an invalid model name")
 		}
 		if !metadata.IsDefined("models", model, "allow_keys") {
-			return nil, nil, fmt.Errorf("MODEL_ACL_FILE model rules require allow_keys")
+			return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE model rules require allow_keys")
 		}
 		for _, key := range rule.AllowKeys {
 			if key == "" || strings.ContainsAny(key, " \t\r\n") {
-				return nil, nil, fmt.Errorf("MODEL_ACL_FILE contains an invalid API key")
+				return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE contains an invalid API key")
 			}
 		}
 	}
-	return nil, config.Models, nil
+	var retryKeys map[string]bool
+	if config.Retry != nil {
+		if !metadata.IsDefined("retry", "allow_keys") {
+			return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE retry rules require allow_keys")
+		}
+		retryKeys = make(map[string]bool)
+		for _, key := range config.Retry.AllowKeys {
+			if key == "" || strings.ContainsAny(key, " \t\r\n") {
+				return nil, nil, nil, fmt.Errorf("MODEL_ACL_FILE contains an invalid retry API key")
+			}
+			retryKeys[key] = true
+		}
+	}
+	return nil, config.Models, retryKeys, nil
 }
 
 func (cfg Config) authenticateACL(r *http.Request) (*modelPolicy, *httpError) {

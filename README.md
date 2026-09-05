@@ -103,6 +103,37 @@ any model restriction, routes that cannot reliably identify a model are denied.
 with their existing access behavior. Route client traffic through the guard to
 enforce this policy; direct access to CPA bypasses it.
 
+## Retry only for selected keys
+
+Add a `[retry]` table to the same `model-acl.toml` and restart the service:
+
+```toml
+[retry]
+allow_keys = ["abc", "def"]
+
+# Optional, independent model access rule:
+[models."gpt-6-astra"]
+allow_keys = ["abc"]
+```
+
+Only the listed keys use the configured retry budget (`MAX_ATTEMPTS`,
+`MAX_ELAPSED_MS`, backoff, and `RETRY_STATUSES`). Other keys get one upstream
+attempt: the first HTTP response is passed through, and a network failure
+returns the guard's `503` error without another attempt or a backoff wait.
+The same policy covers both retryable HTTP statuses and network failures.
+Successful streaming responses are still never replayed.
+
+`allow_keys = []` disables retries for everyone; `allow_keys = ["*"]` allows
+retries for everyone. Omitting `[retry]` retains the existing retry behavior.
+A `[retry]` table without `allow_keys` is invalid. Key matching is exact and
+supports the same three credential headers as model ACL; missing or ambiguous
+credentials do not qualify for a key-specific retry allowance.
+
+Retry permission does not grant access to any model or bypass CPA authentication.
+A file containing only `[retry]` configures retries without enabling model ACL;
+requests still reach the upstream for their initial attempt. Model ACL, when
+configured, is checked first and can reject a request before any attempt.
+
 ## Build and test
 
 ```bash
