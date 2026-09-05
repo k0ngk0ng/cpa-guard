@@ -3,3 +3,6 @@
 .env
 .env.*
 !.env.example
+/model-acl.json
+/model-acl.toml
+/.work/

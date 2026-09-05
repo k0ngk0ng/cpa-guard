@@ -20,6 +20,7 @@ Copy `.env.example` to the service's `.env` and adjust the retry budget to the c
 | --- | ---: | --- |
 | `APP_PORT` | `8217` | Listening port when `LISTEN_ADDR` is unset |
 | `UPSTREAM_URL` | `http://127.0.0.1:8317` | Existing CPA endpoint |
+| `MODEL_ACL_FILE` | unset | Optional TOML model ACL file (legacy JSON also supported) |
 | `MAX_ATTEMPTS` | `100` | Total attempts, capped at 500 |
 | `MAX_ELAPSED_MS` | `3300000` in the example | Overall retry budget |
 | `RETRY_STATUSES` | `502,503,504` | Statuses retried before output starts |
@@ -34,6 +35,69 @@ configured limits). It does not log the request body, query string, or
 authorization headers. Set it back to `false` after diagnosis.
 
 Do not enable high retry counts without accounting for duplicate upstream work and billing. A 503 can arrive after an upstream has accepted a POST, so tool calls and other side effects must remain idempotent at the caller level.
+
+## Model access control
+
+Set `MODEL_ACL_FILE` to an absolute path ending in `.toml`, for example
+`/home/cliproxy/cpa-guard/model-acl.toml`:
+
+```toml
+# Only these keys may use this model.
+[models."gpt-4o"]
+allow_keys = ["key-for-team-a", "key-for-team-b"]
+
+# Explicitly allow every key (also the default for models not listed).
+[models."gpt-4o-mini"]
+allow_keys = ["*"]
+
+# Disable this model for every key.
+[models."claude-sonnet-4-5"]
+allow_keys = []
+```
+
+Rules use exact, case-sensitive model names accepted by CPA. Always quote model
+names, especially those containing dots or slashes. Models not listed are
+allowed by default; an empty TOML file imposes no model restrictions.
+Every listed model must have an `allow_keys` array. Comments, multiline arrays,
+and trailing commas are supported. Unknown fields, duplicate rules, missing
+`allow_keys`, and invalid values prevent startup.
+
+The guard forwards the original key; CPA remains responsible for validating it.
+`["*"]` allows any key through the model ACL, including keys not mentioned in
+this file, but does not bypass CPA authentication. Clients must send exactly one
+credential: `Authorization: Bearer <key>`, `X-Api-Key`, or `X-Goog-Api-Key`.
+Missing, conflicting, and query-string credentials receive `401`. A key denied
+access to the requested model receives `403` before any upstream attempt.
+
+Protect the file as a secret (for example, mode `0600`, readable by the service
+account). `model-acl.toml` and `model-acl.json` are ignored by Git. Restart the
+service after changes. With `MODEL_ACL_FILE` unset, ACL is disabled and existing
+proxy behavior is preserved.
+
+For compatibility, files without a `.toml` extension retain the original JSON
+format: `{"key-a":["gpt-4o"],"key-admin":["*"]}`. This legacy format is a
+**per-key whitelist**: unknown keys are rejected, and an empty object denies all
+keys. TOML uses **per-model rules**, with unlisted models allowed by default.
+
+Restricted keys support JSON `POST` requests to `/v1/chat/completions`,
+`/v1/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/messages`,
+`/v1/messages/count_tokens`, `/v1/images/generations`, `/v1/audio/speech`, and
+`/v1/moderations`. Each requires `Content-Type: application/json` and an explicit
+nonempty string `model`. Invalid, missing, or ambiguous model fields receive
+`400`. Compressed bodies, query parameters, encoded paths, multipart requests,
+WebSocket connections, and other routes are denied for restricted keys.
+Streaming JSON requests (`"stream": true`) retain normal proxy behavior.
+
+With TOML configuration, `GET /v1/models` filters the upstream list, removing
+models the current key cannot use while retaining unlisted models. Invalid or
+oversized upstream lists return `502` instead of leaking an unfiltered list.
+With legacy JSON configuration, restricted keys receive their configured model
+names locally; unrestricted keys receive the upstream list.
+A key that can access every model can use all upstream routes. For a key with
+any model restriction, routes that cannot reliably identify a model are denied.
+`/healthz`, `/readyz`, and the optionally enabled `/metrics` remain local endpoints
+with their existing access behavior. Route client traffic through the guard to
+enforce this policy; direct access to CPA bypasses it.
 
 ## Build and test
 

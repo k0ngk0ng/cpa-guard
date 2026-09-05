@@ -69,9 +69,15 @@ type Config struct {
 	BodyDir               string
 	Debug                 bool
 	RetryStatuses         map[int]struct{}
+	ModelACL              modelACL
+	ModelRules            modelRules
 }
 
 func loadConfig() (Config, error) {
+	acl, rules, err := loadACLConfig(strings.TrimSpace(os.Getenv("MODEL_ACL_FILE")))
+	if err != nil {
+		return Config{}, err
+	}
 	upstreamText := envString("UPSTREAM_URL", defaultUpstreamURL)
 	upstream, err := url.Parse(upstreamText)
 	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
@@ -177,6 +183,8 @@ func loadConfig() (Config, error) {
 		BodyDir:               envString("BODY_DIR", os.TempDir()),
 		Debug:                 envBool("DEBUG", false),
 		RetryStatuses:         statuses,
+		ModelACL:              acl,
+		ModelRules:            rules,
 	}, nil
 }
 
@@ -418,6 +426,12 @@ func (p *Proxy) doAttempt(incoming *http.Request, body *spooledBody, attempt int
 		return attemptResult{err: err}
 	}
 	upstreamRequest.Header = cloneRequestHeaders(incoming.Header)
+	if p.cfg.ModelRules != nil && incoming.Method == http.MethodGet && incoming.URL.Path == "/v1/models" {
+		upstreamRequest.Header.Set("Accept-Encoding", "identity")
+		upstreamRequest.Header.Del("If-None-Match")
+		upstreamRequest.Header.Del("If-Modified-Since")
+		upstreamRequest.Header.Del("Range")
+	}
 	if body != nil {
 		upstreamRequest.ContentLength = body.size
 		upstreamRequest.Header.Set("Content-Length", strconv.FormatInt(body.size, 10))
@@ -708,6 +722,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := requestLogPath(r)
 	w.Header().Set("X-Cpa-Guard-Request-ID", requestID)
 	start := time.Now()
+	policy, aclErr := p.cfg.authenticateACL(r)
+	if aclErr != nil {
+		sendJSONError(w, aclErr.Status, aclErr.Message, 0)
+		p.metrics.recordStatus(aclErr.Status)
+		p.logRequest(requestID, r.Method, path, aclErr.Status, 0, "acl_rejected", start)
+		return
+	}
 	if !p.acquire() {
 		sendJSONError(w, http.StatusServiceUnavailable, "retry capacity is currently full", 0)
 		p.logRequest(requestID, r.Method, path, http.StatusServiceUnavailable, 0, "capacity_full", start)
@@ -739,6 +760,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if policy != nil {
+		if aclErr := policy.authorize(r, body); aclErr != nil {
+			sendJSONError(w, aclErr.Status, aclErr.Message, 0)
+			p.metrics.recordStatus(aclErr.Status)
+			p.logRequest(requestID, r.Method, path, aclErr.Status, 0, "acl_rejected", start)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && policy.allow != nil && !policy.unrestricted() {
+			policy.allow.writeModels(w)
+			p.metrics.recordStatus(http.StatusOK)
+			p.logRequest(requestID, r.Method, path, http.StatusOK, 0, "acl_models", start)
+			return
+		}
+	}
 	status, attempts, outcome := p.forwardWithRetries(w, r, body)
 	if status > 0 {
 		p.metrics.recordStatus(status)
@@ -786,6 +821,14 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 		}
 
 		response := result.response
+		if p.cfg.ModelRules != nil && incoming.Method == http.MethodGet && incoming.URL.Path == "/v1/models" && (response.StatusCode >= 200 && response.StatusCode < 300 || response.StatusCode == http.StatusNotModified) {
+			policy, policyErr := p.cfg.authenticateACL(incoming)
+			if policyErr != nil || filterModelList(response, policy, p.cfg.MaxBodyBytes) != nil {
+				result.release()
+				sendJSONError(w, http.StatusBadGateway, "unable to filter upstream model list", attempt)
+				return http.StatusBadGateway, attempt, "model_list_error"
+			}
+		}
 		if _, retryable := p.cfg.RetryStatuses[response.StatusCode]; !retryable {
 			status, copyErr := forwardResponse(w, response, attempt)
 			result.release()
