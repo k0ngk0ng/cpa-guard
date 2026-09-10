@@ -721,19 +721,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 	}
 	requestID := newRequestID()
-	path := requestLogPath(r)
 	w.Header().Set("X-Cpa-Guard-Request-ID", requestID)
 	start := time.Now()
 	policy, aclErr := p.cfg.authenticateACL(r)
 	if aclErr != nil {
 		sendJSONError(w, aclErr.Status, aclErr.Message, 0)
 		p.metrics.recordStatus(aclErr.Status)
-		p.logRequest(requestID, r.Method, path, aclErr.Status, 0, "acl_rejected", start)
+		p.logRequest(requestID, r, aclErr.Status, 0, "acl_rejected", start)
 		return
 	}
 	if !p.acquire() {
 		sendJSONError(w, http.StatusServiceUnavailable, "retry capacity is currently full", 0)
-		p.logRequest(requestID, r.Method, path, http.StatusServiceUnavailable, 0, "capacity_full", start)
+		p.logRequest(requestID, r, http.StatusServiceUnavailable, 0, "capacity_full", start)
 		return
 	}
 	defer p.release()
@@ -748,17 +747,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &requestErr) {
 			sendJSONError(w, requestErr.Status, requestErr.Message, 0)
 			p.metrics.recordStatus(requestErr.Status)
-			p.logRequest(requestID, r.Method, path, requestErr.Status, 0, "request_rejected", start)
+			p.logRequest(requestID, r, requestErr.Status, 0, "request_rejected", start)
 			return
 		}
 		if r.Context().Err() != nil {
 			p.metrics.clientCancelled.Add(1)
-			p.logRequest(requestID, r.Method, path, 0, 0, "client_cancelled", start)
+			p.logRequest(requestID, r, 0, 0, "client_cancelled", start)
 			return
 		}
 		sendJSONError(w, http.StatusBadRequest, "unable to read request body", 0)
 		p.metrics.recordStatus(http.StatusBadRequest)
-		p.logRequest(requestID, r.Method, path, http.StatusBadRequest, 0, "request_body_error", start)
+		p.logRequest(requestID, r, http.StatusBadRequest, 0, "request_body_error", start)
 		return
 	}
 
@@ -766,13 +765,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if aclErr := policy.authorize(r, body); aclErr != nil {
 			sendJSONError(w, aclErr.Status, aclErr.Message, 0)
 			p.metrics.recordStatus(aclErr.Status)
-			p.logRequest(requestID, r.Method, path, aclErr.Status, 0, "acl_rejected", start)
+			p.logRequest(requestID, r, aclErr.Status, 0, "acl_rejected", start)
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && policy.allow != nil && !policy.unrestricted() {
 			policy.allow.writeModels(w)
 			p.metrics.recordStatus(http.StatusOK)
-			p.logRequest(requestID, r.Method, path, http.StatusOK, 0, "acl_models", start)
+			p.logRequest(requestID, r, http.StatusOK, 0, "acl_models", start)
 			return
 		}
 	}
@@ -783,7 +782,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if outcome == "client_cancelled" {
 		p.metrics.clientCancelled.Add(1)
 	}
-	p.logRequest(requestID, r.Method, path, status, attempts, outcome, start)
+	p.logRequest(requestID, r, status, attempts, outcome, start)
 }
 
 func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request, body *spooledBody) (int, int, string) {
@@ -893,6 +892,35 @@ func requestLogPath(r *http.Request) string {
 	return path
 }
 
+// Keep the socket peer separate from proxy-provided headers, which may be
+// client-controlled. Preserve all header values for multi-proxy diagnostics.
+func addRequestLogIdentity(entry map[string]any, r *http.Request) {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
+	}
+	entry["remote_ip"] = peer
+	entry["forwarded"] = strings.Join(r.Header.Values("Forwarded"), ", ")
+	entry["x_forwarded_for"] = strings.Join(r.Header.Values("X-Forwarded-For"), ", ")
+	entry["x_real_ip"] = strings.Join(r.Header.Values("X-Real-IP"), ", ")
+	key, err := requestAPIKey(r)
+	if err != nil {
+		key = ""
+	}
+	entry["api_key"] = maskAPIKey(key)
+}
+
+func maskAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	chars := []rune(key)
+	if len(chars) <= 8 {
+		return "****"
+	}
+	return string(chars[:4]) + "****" + string(chars[len(chars)-4:])
+}
+
 // logRequestBodyDebug emits diagnostics for failures that happen before an
 // upstream attempt. It intentionally records request metadata only: request
 // bodies, authorization headers, and query parameters must never be logged.
@@ -916,21 +944,23 @@ func (p *Proxy) logRequestBodyDebug(requestID string, r *http.Request, err error
 		"body_dir":          p.cfg.BodyDir,
 		"error":             err.Error(),
 	}
+	addRequestLogIdentity(entry, r)
 	payload, _ := json.Marshal(entry)
 	fmt.Println(string(payload))
 }
 
-func (p *Proxy) logRequest(requestID, method, path string, status, attempts int, outcome string, start time.Time) {
+func (p *Proxy) logRequest(requestID string, r *http.Request, status, attempts int, outcome string, start time.Time) {
 	entry := map[string]any{
 		"event":       "request",
 		"request_id":  requestID,
-		"method":      method,
-		"path":        path,
+		"method":      r.Method,
+		"path":        requestLogPath(r),
 		"status":      status,
 		"attempts":    attempts,
 		"outcome":     outcome,
 		"duration_ms": time.Since(start).Milliseconds(),
 	}
+	addRequestLogIdentity(entry, r)
 	payload, _ := json.Marshal(entry)
 	fmt.Println(string(payload))
 }

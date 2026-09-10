@@ -28,6 +28,15 @@ Copy `.env.example` to the service's `.env` and adjust the retry budget to the c
 | `BODY_DIR` | `/home/cliproxy/cpa-guard/tmp` | Temporary request-body spool |
 | `DEBUG` | `false` | Log safe request-body failure diagnostics; never logs bodies or authorization headers |
 
+Request logs include `remote_ip` (the socket peer without its port), `forwarded`,
+`x_forwarded_for`, and `x_real_ip`. Proxy headers retain all supplied values and
+are diagnostic metadata, not verified client identities. Both `request` and
+`request_body_debug` logs include `api_key`: the first and last four characters
+separated by `****`; keys of eight characters or fewer are fully masked as
+`****`. Missing, malformed, or ambiguous credentials produce an empty value.
+The supported key headers are `Authorization: Bearer`, `X-Api-Key`, and
+`X-Goog-Api-Key`; query credentials are never logged.
+
 When diagnosing a `request_body_error`, set `DEBUG=true` and restart cpa-guard.
 The next failure emits a `request_body_debug` JSON line containing the underlying
 read/spool error plus request-body metadata (length, transfer encoding, and the
