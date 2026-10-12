@@ -831,7 +831,12 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 				return http.StatusBadGateway, attempt, "model_list_error"
 			}
 		}
-		if _, retryable := p.cfg.RetryStatuses[response.StatusCode]; !retryable {
+		_, retryable := p.cfg.RetryStatuses[response.StatusCode]
+		capacityError := false
+		if !retryable && incoming.Method == http.MethodPost && incoming.URL.Path == "/v1/responses" && maxAttempts > 1 {
+			capacityError = retryableCapacityStream(response)
+		}
+		if !retryable && !capacityError {
 			status, copyErr := forwardResponse(w, response, attempt)
 			result.release()
 			if copyErr != nil && incoming.Context().Err() != nil {
@@ -863,8 +868,14 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 			p.metrics.retry504.Add(1)
 		}
 		p.metrics.retries.Add(1)
-		drainResponse(response, p.cfg.MaxResponseDrainBytes)
-		result.release()
+		if capacityError {
+			// A failed SSE stream need not end promptly. Cancel without draining.
+			result.release()
+			_ = response.Body.Close()
+		} else {
+			drainResponse(response, p.cfg.MaxResponseDrainBytes)
+			result.release()
+		}
 		if err := sleepContext(incoming.Context(), delay); err != nil {
 			if incoming.Context().Err() != nil {
 				return 0, attempt, "client_cancelled"
