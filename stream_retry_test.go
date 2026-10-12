@@ -19,6 +19,11 @@ func TestCapacityStreamHTTP(t *testing.T) {
 		want              int
 	}{
 		{"capacity_then_success", prelude + failure, false, false, 2},
+		{"server_error_then_success", strings.ReplaceAll(prelude+failure, "server_is_overloaded", "server_error"), false, false, 2},
+		{"server_error_event", "data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\"}}\n\n", false, false, 2},
+		{"server_error_budget_exhausted", strings.ReplaceAll(prelude+failure, "server_is_overloaded", "server_error"), false, true, 3},
+		{"server_error_disabled", strings.ReplaceAll(prelude+failure, "server_is_overloaded", "server_error"), true, false, 1},
+		{"server_error_after_output", strings.ReplaceAll(prelude+success+failure, "server_is_overloaded", "server_error"), false, false, 1},
 		{"error_event", "data: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n", false, false, 2},
 		{"budget_exhausted", prelude + failure, false, true, 3},
 		{"disabled", prelude + failure, true, false, 1},

@@ -179,10 +179,11 @@ It does not read or modify the gateway configuration. The installer only creates
 Port `8217` is plain HTTP for the internal ingress-to-host hop; keep it
 firewalled to your ingress/network ranges.
 
-### Capacity errors inside HTTP 200 streams
+### Transient errors inside HTTP 200 streams
 
 For `POST /v1/responses`, cpa-guard also retries an HTTP 200 SSE stream when
-`response.failed` or `error` reports `server_is_overloaded` before any output.
+`response.failed` or `error` reports `server_is_overloaded` or `server_error`
+before any output.
 The existing retry-key policy, attempt limit, elapsed budget, and backoff apply.
 Only `response.created`, `response.in_progress`, and SSE metadata/comments are
 buffered before output, up to 64 KiB. Unknown events, malformed payloads, other

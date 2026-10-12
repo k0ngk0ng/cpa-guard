@@ -18,7 +18,7 @@ type replayStreamBody struct {
 	io.Closer
 }
 
-func retryableCapacityStream(response *http.Response) bool {
+func retryableErrorStream(response *http.Response) bool {
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if response.StatusCode != http.StatusOK || mediaType != "text/event-stream" || response.Header.Get("Content-Encoding") != "" {
 		return false
@@ -62,9 +62,9 @@ func retryableCapacityStream(response *http.Response) bool {
 				}
 				switch event.Type {
 				case "error":
-					return event.Error.Code == "server_is_overloaded"
+					return retryableStreamErrorCode(event.Error.Code)
 				case "response.failed":
-					return event.Response.Error.Code == "server_is_overloaded"
+					return retryableStreamErrorCode(event.Response.Error.Code)
 				case "response.created", "response.in_progress":
 					if len(event.Response.Output) != 0 {
 						return false
@@ -79,4 +79,8 @@ func retryableCapacityStream(response *http.Response) bool {
 		}
 	}
 	return false
+}
+
+func retryableStreamErrorCode(code string) bool {
+	return code == "server_is_overloaded" || code == "server_error"
 }

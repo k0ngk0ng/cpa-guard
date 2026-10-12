@@ -832,11 +832,11 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 			}
 		}
 		_, retryable := p.cfg.RetryStatuses[response.StatusCode]
-		capacityError := false
+		streamError := false
 		if !retryable && incoming.Method == http.MethodPost && incoming.URL.Path == "/v1/responses" && maxAttempts > 1 {
-			capacityError = retryableCapacityStream(response)
+			streamError = retryableErrorStream(response)
 		}
-		if !retryable && !capacityError {
+		if !retryable && !streamError {
 			status, copyErr := forwardResponse(w, response, attempt)
 			result.release()
 			if copyErr != nil && incoming.Context().Err() != nil {
@@ -868,7 +868,7 @@ func (p *Proxy) forwardWithRetries(w http.ResponseWriter, incoming *http.Request
 			p.metrics.retry504.Add(1)
 		}
 		p.metrics.retries.Add(1)
-		if capacityError {
+		if streamError {
 			// A failed SSE stream need not end promptly. Cancel without draining.
 			result.release()
 			_ = response.Body.Close()
