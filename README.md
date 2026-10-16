@@ -183,14 +183,19 @@ firewalled to your ingress/network ranges.
 
 For `POST /v1/responses`, cpa-guard also retries an HTTP 200 SSE stream when
 `response.failed` or `error` reports `server_is_overloaded` or `server_error`
-before any output.
+before output is delivered to the client.
 The existing retry-key policy, attempt limit, elapsed budget, and backoff apply.
-Only `response.created`, `response.in_progress`, and SSE metadata/comments are
-buffered before output, up to 64 KiB. Unknown events, malformed payloads, other
-errors, and output events are passed through without retry. Once output starts,
-the stream is never retried. Exhausted attempts return the final original stream,
+Initial lifecycle events, `response.metadata`, SSE comments, and incomplete
+`custom_tool_call` / `function_call` items and their matching input/argument deltas
+are buffered, up to 64 KiB total. A retryable error during this phase discards the
+buffer and retries without exposing partial tool input to the client.
+Tool input/arguments completion or item completion releases the buffer immediately;
+text output, unknown events, malformed payloads, other errors, EOF, or the buffer
+limit also switch to passthrough. After passthrough starts, the stream is never
+retried, preventing replay of tool calls already delivered to the client. Exhausted attempts return the final original stream,
 including its HTTP 200 status and error event. Non-streaming JSON is unchanged.
-Buffering initial lifecycle events can delay their delivery until the next event.
+Buffering delays initial events and tool-input deltas until completion or another
+passthrough condition; tool calls larger than the buffer limit cannot be retried.
 
 Reproduce the HTTP-chain regression tests with:
 
